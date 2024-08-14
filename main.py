@@ -1,5 +1,6 @@
 import os
 import tempfile
+import requests  # Import requests to handle image URL downloads
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 
@@ -7,6 +8,16 @@ import google.generativeai as genai
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
 app = Flask(__name__)
+
+def download_image_from_url(image_url):
+    """Downloads the image from a given URL and saves it locally."""
+    response = requests.get(image_url)
+    if response.status_code == 200:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            temp_file.write(response.content)
+            return temp_file.name
+    else:
+        raise Exception("Failed to download image")
 
 def upload_to_gemini(file_path, mime_type=None):
     """Uploads the given file to Gemini."""
@@ -33,9 +44,8 @@ chat_sessions = {}
 
 @app.route('/api/process', methods=['POST'])
 def process_image_and_prompt():
-    if 'image' not in request.files or 'prompt' not in request.form:
-        return jsonify({"error": "Image and prompt are required."}), 400
-
+    prompt = request.form.get('prompt')
+    image_url = request.form.get('image_url')
     session_id = request.form.get('session_id')
     uid = session_id  # Use session_id as uid for this example
 
@@ -44,29 +54,35 @@ def process_image_and_prompt():
         session_id = str(len(chat_sessions) + 1)
         chat_sessions[session_id] = model.start_chat(history=[])
 
-    image = request.files['image']
-    prompt = request.form['prompt']
+    # Check if image_url is provided and download the image
+    if image_url:
+        try:
+            image_path = download_image_from_url(image_url)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+    else:
+        return jsonify({"error": "Image URL is required."}), 400
 
     # Create a temporary file to save the image
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+        temp_file.write(requests.get(image_url).content)
         image_path = temp_file.name
-        image.save(image_path)
 
-        # Upload the image to Gemini and get the file URI
-        file_uri = upload_to_gemini(image_path, mime_type=image.mimetype)
+    # Upload the image to Gemini and get the file URI
+    file_uri = upload_to_gemini(image_path, mime_type='image/jpeg')
 
-        # Construct the API URL with prompt, file_uri, and uid (URL 1)
-        api_url = f"/gemini?prompt={prompt}&url={file_uri}&uid={uid}"
+    # Construct the API URL with prompt, file_uri, and uid (URL 1)
+    api_url = f"/gemini?prompt={prompt}&url={file_uri}&uid={uid}"
 
-        # Log the constructed URL for debugging
-        print(f"Generated API URL: {api_url}")
+    # Log the constructed URL for debugging
+    print(f"Generated API URL: {api_url}")
 
-        # Update the chat session with the image and prompt
-        chat_session = chat_sessions[session_id]
-        chat_session.history.append({"role": "user", "parts": [file_uri, prompt]})
+    # Update the chat session with the image and prompt
+    chat_session = chat_sessions[session_id]
+    chat_session.history.append({"role": "user", "parts": [file_uri, prompt]})
 
-        # Send the message and get the response from Gemini
-        response = chat_session.send_message(prompt)
+    # Send the message and get the response from Gemini
+    response = chat_session.send_message(prompt)
 
     # Clean up the temporary file
     os.remove(image_path)
